@@ -2587,6 +2587,10 @@ def operating_scenarios():
             if col not in df_ps.columns:
                 df_ps[col] = None
         
+        # For pumped storage rows, convert empty prob_not_operating to 0.0 (unit always operates).
+        if 'prob_not_operating' in df_ps.columns:
+            df_ps['prob_not_operating'] = pd.to_numeric(df_ps['prob_not_operating'], errors='coerce').fillna(0.0)
+        
         # Combine the two DataFrames.
         df_os = pd.concat([df_ror, df_ps], ignore_index=True)
         
