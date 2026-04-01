@@ -1589,6 +1589,11 @@ def load_project():
         # Restore operating scenarios
         if project_data.get('operating_scenarios'):
             df = pd.DataFrame(project_data['operating_scenarios'])
+            # Filter out completely empty rows (all NaN)
+            df = df.dropna(how='all')
+            # Also drop rows where critical columns are all NaN
+            if not df.empty and 'Scenario' in df.columns:
+                df = df.dropna(subset=['Scenario', 'Facility'], how='all')
             op_scen_path = os.path.join(sim_folder, 'operating_scenarios.csv')
             df.to_csv(op_scen_path, index=False)
             session['op_scen_file'] = op_scen_path
