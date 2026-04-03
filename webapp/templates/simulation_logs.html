@@ -278,6 +278,51 @@
         // Check if simulation already completed
         const simulationStatus = "{{ simulation_status }}";
         const reportPath = "{{ report_path }}";
+        const params = new URLSearchParams(window.location.search);
+        const runId = "{{ run_id | default('', true) }}" || params.get("run") || "";
+
+        function appendFailedLogLine(text) {
+            const line = document.createElement("div");
+            line.className = "log-line";
+            if (text.includes("[ERROR]") || text.toLowerCase().includes("error")) {
+                line.className += " log-error";
+            } else if (text.includes("[WARNING]") || text.toLowerCase().includes("warning")) {
+                line.className += " log-warning";
+            } else {
+                line.className += " log-info";
+            }
+            line.textContent = text;
+            logOutput.appendChild(line);
+        }
+
+        async function loadFailedRunLogs() {
+            if (!runId) {
+                appendFailedLogLine("[WARNING] Missing run id; unable to fetch trace logs.");
+                return;
+            }
+            try {
+                const resp = await fetch(`/log_tail?run=${encodeURIComponent(runId)}&offset=0`);
+                if (!resp.ok) {
+                    appendFailedLogLine(`[WARNING] log_tail returned HTTP ${resp.status}.`);
+                    return;
+                }
+                const data = await resp.json();
+                if (!data.text || !data.text.trim()) {
+                    appendFailedLogLine("[WARNING] No traceback lines were captured for this run.");
+                    return;
+                }
+                const lines = data.text.split(/\r?\n/);
+                for (const line of lines) {
+                    if (!line) {
+                        continue;
+                    }
+                    appendFailedLogLine(line);
+                }
+                logOutput.scrollTop = logOutput.scrollHeight;
+            } catch (err) {
+                appendFailedLogLine(`[WARNING] Failed to fetch trace logs: ${err}`);
+            }
+        }
         
         if (simulationStatus === 'completed') {
             // Show completed state immediately
@@ -308,7 +353,8 @@
             currentActivity.textContent = 'Run failed';
             currentProgress.textContent = 'See logs below for the exact error.';
             timeRemaining.textContent = 'Stopped';
-            logOutput.innerHTML = '<div class="log-error">❌ The simulation failed. Scroll logs for traceback details.</div>';
+            logOutput.innerHTML = '<div class="log-error">Simulation failed. Loading traceback details...</div>';
+            loadFailedRunLogs();
         } else if (simulationStatus === 'stalled') {
             // Simulation appears to be stalled
             progressBar.style.width = '50%';
@@ -336,9 +382,6 @@
             let currentIteration = 0;
             let logLineCount = 0;
             let hasFailed = false;
-
-            const params = new URLSearchParams(window.location.search);
-            const runId = "{{ run_id | default('', true) }}" || params.get('run') || "";
             if (!runId) {
                 addLogLine("[ERROR] Missing run id. Reload this page from the Run Simulation action.");
                 statusText.textContent = '⚠️ Missing Run ID';

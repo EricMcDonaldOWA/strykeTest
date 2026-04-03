@@ -772,8 +772,23 @@ def run_xls_simulation_in_background(ws, wks, output_name, q, data_dict=None):
         log.info("Simulation completed successfully.")
     except Exception as e:
         log.exception("Simulation failed (XLS).")
+        try:
+            logging.getLogger().exception("Simulation failed (XLS) [root mirror].")
+        except Exception:
+            pass
+        try:
+            if old_stderr is not None:
+                old_stderr.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
         try: q.put(f"[ERROR] Simulation failed: {e}")
         except Exception: pass
+        try:
+            failed_marker = os.path.join(ws, "simulation_failed.flag")
+            with open(failed_marker, "w", encoding="utf-8") as f:
+                f.write(f"{datetime.now().isoformat()} :: {e}")
+        except Exception:
+            pass
     finally:
         # restore stdio
         sys.stdout, sys.stderr = old_stdout, old_stderr
@@ -4485,8 +4500,12 @@ def run_simulation_in_background_custom(data_dict, q):
     log_file = None
     if proj_dir:
         log_file = os.path.join(proj_dir, 'simulation_debug.log')
-        with open(log_file, 'w') as f:
-            f.write("=== SIMULATION LOG START ===\n")
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(f"=== SIMULATION LOG START ({datetime.now().isoformat()}) ===\n")
+        except Exception as exc:
+            log.warning("Failed to initialize debug log %s: %s", log_file, exc)
+            log_file = None
 
     def _emit(msg: str):
         line = str(msg).rstrip("\n")
@@ -4569,6 +4588,15 @@ def run_simulation_in_background_custom(data_dict, q):
         log.info("Simulation completed successfully.")
     except Exception as e:
         log.exception("Simulation failed (UI-driven).")
+        try:
+            logging.getLogger().exception("Simulation failed (UI-driven) [root mirror].")
+        except Exception:
+            pass
+        try:
+            if old_stderr is not None:
+                old_stderr.write(traceback.format_exc() + "\n")
+        except Exception:
+            pass
         _emit(f"[ERROR] Simulation failed: {e}")
         for tb_line in traceback.format_exc().splitlines():
             _emit(f"[ERROR] {tb_line}")
