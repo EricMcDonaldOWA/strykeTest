@@ -1458,6 +1458,7 @@ def load_project():
                     session['scenario_type'] = 'hydrograph'
         
         # Restore hydrograph
+        session.pop('hydrograph_file', None)
         if project_data.get('hydrograph'):
             df = pd.DataFrame(project_data['hydrograph'])
             hydro_csv_path = os.path.join(sim_folder, 'hydrograph.csv')
@@ -2117,6 +2118,7 @@ def flow_scenarios():
             })
         else:
             # For static discharge scenario.
+            session.pop('hydrograph_file', None)
             if discharge and session.get('units', 'metric') == 'metric':
                 discharge_converted = float(discharge) * 35.3147
             else:
@@ -4714,6 +4716,12 @@ def run_simulation():
     if 'population_data_for_sim' in session:
         pop_df = session['population_data_for_sim']
     
+    hydrograph_file = session.get('hydrograph_file')
+    if hydrograph_file is not None:
+        hydrograph_file = str(hydrograph_file).strip()
+        if hydrograph_file.lower() in {"", "none", "null", "nan"}:
+            hydrograph_file = None
+
     data_dict = {
         'proj_dir': run_dir,
         'project_name': session.get('project_name'),
@@ -4725,7 +4733,6 @@ def run_simulation():
         'operating_scenarios_file': session.get('op_scen_file'),
         'population': pop_df,
         'flow_scenarios': session.get('flow_scenario'),
-        'hydrograph_file': session.get('hydrograph_file'),
         'graph_data': graph_data,
         'graph_summary': graph_summary,
         'units_system': session.get('units', 'imperial'),
@@ -4733,6 +4740,8 @@ def run_simulation():
         'output_name': output_name,
         'run_id': run_id,
     }
+    if hydrograph_file:
+        data_dict['hydrograph_file'] = hydrograph_file
     
     # Start the UI-driven worker with the per-run queue
     t = threading.Thread(target=run_simulation_in_background_custom,
