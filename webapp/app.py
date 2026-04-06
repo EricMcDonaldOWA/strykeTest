@@ -2390,20 +2390,22 @@ def unit_parameters():
         # for key, value in request.form.items():
         #     print(f"{key} : {value}")
 
-        # Merge form data into rows (each row represents one unit's parameters)
+        # Merge form data into rows (each row represents one unit's parameters).
+        # Form names are `<field>_<facility_index>_<unit_index>`, for example:
+        #   `velocity_0_1`, `Qcap_1_2`, `penstock_qcap_0_3`
+        # We must key rows by BOTH indices so units in different facilities do not collide.
         rows = {}
         for key, value in request.form.items():
-            parts = key.rsplit('_', 1)
-            if len(parts) != 2:
+            parts = key.rsplit('_', 2)
+            if len(parts) != 3:
                 continue
-            field_name, row_id = parts
-            # Remove any trailing underscore and digits from field_name
-            clean_field_name = re.sub(r'_\d+$', '', field_name)
-            #print(f"Key: {key} split into clean_field_name: {clean_field_name} and row_id: {row_id}")
-            if row_id.isdigit():
-                if row_id not in rows:
-                    rows[row_id] = {}
-                rows[row_id][clean_field_name] = value
+            field_name, facility_idx, unit_idx = parts
+            if not (facility_idx.isdigit() and unit_idx.isdigit()):
+                continue
+            row_id = f"{facility_idx}_{unit_idx}"
+            if row_id not in rows:
+                rows[row_id] = {}
+            rows[row_id][field_name] = value
 
         # print("Merged rows:")
         # for row_id, data in rows.items():
@@ -4932,7 +4934,7 @@ def generate_report(sim):
     Generate the comprehensive HTML report for the simulation.
     Robust HDF5 open with retry/backoff; guaranteed close; headless plotting.
     """
-    import os, time, io, base64, logging, gc
+    import os, time, io, base64, logging, gc, re
     from datetime import datetime
     import pandas as pd
 
@@ -5003,37 +5005,121 @@ def generate_report(sim):
                 return None
             return None
 
+        def _normalize_report_df(df):
+            if not isinstance(df, pd.DataFrame):
+                return df
+            out = df.copy()
+            out.columns = [str(col).strip() for col in out.columns]
+            return out
+
+        def _norm_col_name(col_name):
+            return re.sub(r"[^a-z0-9]+", "_", str(col_name).strip().lower()).strip("_")
+
+        def _find_column(df, *candidates):
+            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                return None
+            normalized = {_norm_col_name(col): col for col in df.columns}
+            for candidate in candidates:
+                match = normalized.get(_norm_col_name(candidate))
+                if match is not None:
+                    return match
+            return None
+
+        def _sum_numeric(df, *candidates):
+            col = _find_column(df, *candidates)
+            if col is None:
+                return None
+            values = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+            return float(values.sum())
+
+        def _fmt_optional_count(value):
+            if value is None:
+                return "N/A"
+            try:
+                return f"{int(round(float(value))):,}"
+            except (TypeError, ValueError):
+                return "N/A"
+
         # --- Executive Summary Metrics ---
         _report_print("[REPORT] Loading summary tables")
-        yearly_df = store["/Yearly_Summary"] if "/Yearly_Summary" in store.keys() else None
-        daily_df = store["/Daily"] if "/Daily" in store.keys() else None
-        pop_df = store["/Population"] if "/Population" in store.keys() else None
+        yearly_df = _normalize_report_df(store["/Yearly_Summary"]) if "/Yearly_Summary" in store.keys() else None
+        daily_df = _normalize_report_df(store["/Daily"]) if "/Daily" in store.keys() else None
+        pop_df = _normalize_report_df(store["/Population"]) if "/Population" in store.keys() else None
+        state_daily_df = _normalize_report_df(store["/State_Daily"]) if "/State_Daily" in store.keys() else None
+        beta_df = _normalize_report_df(store["/Beta_Distributions"]) if "/Beta_Distributions" in store.keys() else None
 
-        total_fish = None
+        total_fish_from_population = None
         if pop_df is not None:
             for col_name in ("Pop_Size", "Population", "PopSize", "pop_size", "Individuals", "count"):
                 if col_name in pop_df.columns:
-                    total_fish = pop_df[col_name].sum()
+                    total_fish_from_population = float(
+                        pd.to_numeric(pop_df[col_name], errors="coerce").fillna(0.0).sum()
+                    )
                     break
-        if total_fish is None and daily_df is not None and not daily_df.empty and {"species", "iteration", "pop_size"} <= set(daily_df.columns):
-            total_fish = daily_df.groupby(["species", "iteration"])["pop_size"].first().sum()
-        if total_fish is None:
-            total_fish = 0
+
+        total_fish_from_daily = _sum_numeric(
+            daily_df,
+            "pop_size",
+            "Pop_Size",
+            "Population",
+            "PopSize",
+            "Individuals",
+            "count",
+        )
+        if total_fish_from_population not in (None, 0.0):
+            total_fish = total_fish_from_population
+        elif total_fish_from_daily not in (None, 0.0):
+            total_fish = total_fish_from_daily
+        else:
+            total_fish = 0.0
 
         mean_entr = mean_mort = prob_entr = 0.0
         overall_surv = 100.0
+        overall_surv_label = "Whole-Project Survival"
+        overall_surv_source = "Unavailable"
+        whole_project_survivors = None
         if yearly_df is not None and not yearly_df.empty:
             first_row = yearly_df.iloc[0]
             mean_entr = float(first_row.get("mean_yearly_entrainment", 0.0) or 0.0)
             mean_mort = float(first_row.get("mean_yearly_mortality", 0.0) or 0.0)
             prob_entr = float(first_row.get("prob_entrainment", 0.0) or 0.0)
 
-        total_entr = total_surv = 0.0
-        if daily_df is not None and not daily_df.empty:
-            total_entr = float(daily_df.get("num_entrained", pd.Series(dtype=float)).sum())
-            total_surv = float(daily_df.get("num_survived", pd.Series(dtype=float)).sum())
-            if total_entr > 0:
-                overall_surv = (total_surv / total_entr) * 100.0
+        total_entr_candidate = _sum_numeric(daily_df, "num_entrained")
+        total_surv_candidate = _sum_numeric(daily_df, "num_survived")
+        total_entr = total_entr_candidate if total_entr_candidate is not None else 0.0
+        total_surv = total_surv_candidate if total_surv_candidate is not None else 0.0
+
+        if state_daily_df is not None and not state_daily_df.empty:
+            move_col = _find_column(state_daily_df, "move")
+            successes_col = _find_column(state_daily_df, "successes")
+            if move_col is not None and successes_col is not None:
+                move_series = pd.to_numeric(state_daily_df[move_col], errors="coerce")
+                valid_moves = move_series.dropna()
+                if not valid_moves.empty:
+                    final_move = int(valid_moves.max())
+                    final_rows = state_daily_df.loc[move_series == final_move]
+                    whole_project_survivors = float(
+                        pd.to_numeric(final_rows[successes_col], errors="coerce").fillna(0.0).sum()
+                    )
+                    if total_fish > 0:
+                        overall_surv = (whole_project_survivors / total_fish) * 100.0
+                        overall_surv_source = "/State_Daily final move successes / /Daily.pop_size total"
+
+        if overall_surv_source == "Unavailable" and beta_df is not None and not beta_df.empty:
+            state_col = _find_column(beta_df, "state")
+            surv_col = _find_column(beta_df, "survival rate", "Mean", "survival_mean")
+            if state_col is not None and surv_col is not None:
+                whole_rows = beta_df[beta_df[state_col].astype(str).str.strip().str.lower() == "whole"]
+                if not whole_rows.empty:
+                    surv_values = pd.to_numeric(whole_rows[surv_col], errors="coerce").dropna()
+                    if not surv_values.empty:
+                        overall_surv = float(surv_values.iloc[0]) * 100.0
+                        overall_surv_source = "/Beta_Distributions whole-project survival"
+
+        if overall_surv_source == "Unavailable" and total_entr > 0:
+            overall_surv = (total_surv / total_entr) * 100.0
+            overall_surv_label = "Entrained Fish Survival"
+            overall_surv_source = "/Daily.num_survived / /Daily.num_entrained"
 
         # Get actual fish counts from simulation data for validation
         simulation_keys = [k for k in store.keys() if k.startswith('/simulations/')]
@@ -5051,6 +5137,8 @@ def generate_report(sim):
                     total_fish_from_sims += len(sim_data)
             except Exception:
                 pass
+        if total_fish <= 0 and total_fish_from_sims > 0:
+            total_fish = float(total_fish_from_sims)
         
         # Check if barotrauma mode is active
         barotrauma_active = False
@@ -5084,7 +5172,7 @@ def generate_report(sim):
         
         exec_summary_html = "<h2>Executive Summary</h2>"
         # Use simulation data as the authoritative source
-        if total_fish_from_sims > 0:
+        if total_fish <= 0 and total_fish_from_sims > 0:
             total_fish = total_fish_from_sims
         
         if any([total_fish, mean_entr, mean_mort, total_entr]):
@@ -5100,7 +5188,7 @@ def generate_report(sim):
                     <div style=\"font-size:28px; font-weight:bold; color:#ffc107;\">{prob_entr:.2%}</div>
                 </div>
                 <div style=\"padding:15px; background:#d4edda; border-left:4px solid #28a745; border-radius:5px;\">
-                    <div style=\"font-size:12px; color:#666; text-transform:uppercase;\">Overall Passage Survival</div>
+                    <div style=\"font-size:12px; color:#666; text-transform:uppercase;\">{overall_surv_label}</div>
                     <div style=\"font-size:28px; font-weight:bold; color:#28a745;\">{overall_surv:.1f}%</div>
                 </div>
                 <div style=\"padding:15px; background:#f8d7da; border-left:4px solid #dc3545; border-radius:5px;\">
@@ -5126,10 +5214,13 @@ def generate_report(sim):
             <div style="margin-top:10px; font-family:monospace; font-size:11px;">
                 <p><strong>Fish Count Sources:</strong></p>
                 <ul>
-                    <li>Total from /simulations/ tables: <strong>{total_fish_from_sims:,}</strong> (all fish that completed passage)</li>
-                    <li>Total from /Population table: <strong>{total_fish if total_fish != total_fish_from_sims else 'N/A'}</strong></li>
+                    <li>Stored rows in /simulations/ tables: <strong>{total_fish_from_sims:,}</strong></li>
+                    <li>Total fish simulated (from /Daily.pop_size): <strong>{_fmt_optional_count(total_fish_from_daily)}</strong></li>
+                    <li>Total from /Population table count column: <strong>{_fmt_optional_count(total_fish_from_population)}</strong></li>
                     <li>Total entrained (from /Daily): <strong>{int(total_entr):,}</strong></li>
-                    <li>Total survived (from /Daily): <strong>{int(total_surv):,}</strong></li>
+                    <li>Entrained fish surviving first turbine encounter (from /Daily.num_survived): <strong>{int(total_surv):,}</strong></li>
+                    <li>Whole-project survivors (from /State_Daily final move): <strong>{_fmt_optional_count(whole_project_survivors)}</strong></li>
+                    <li>Executive survival metric source: <strong>{overall_surv_source}</strong></li>
                 </ul>
                 <p><strong>Mortality Model Configuration:</strong></p>
                 <ul>
@@ -5412,11 +5503,17 @@ def generate_report(sim):
             report_sections.append("<p><em>Mortality factor breakdown not available (add mortality component tracking to enable).</em></p>")
         
         if overall_surv < 70.0:  # Flag low survival rates
+            if overall_surv_label == "Entrained Fish Survival":
+                warning_title = f"⚠️ Low Entrained Fish Survival Detected ({overall_surv:.1f}%)"
+                warning_intro = "Potential causes for entrained-fish turbine survival below 70%:"
+            else:
+                warning_title = f"⚠️ Low Whole-Project Survival Detected ({overall_surv:.1f}%)"
+                warning_intro = "Potential contributors to whole-project survival below 70%:"
             baro_note = " <strong>Barotrauma is ACTIVE</strong> and may be contributing significantly to mortality." if barotrauma_active else " Barotrauma mode is inactive."
             report_sections.append(f"""
             <div style="padding:15px; background:#fff3cd; border-left:4px solid #ffc107; border-radius:5px; margin:20px 0;">
-                <p style="margin:0;"><strong>⚠️ Low Survival Rate Detected ({overall_surv:.1f}%)</strong></p>
-                <p style="margin:5px 0;">Potential causes for Francis turbine survival below 70%:</p>
+                <p style="margin:0;"><strong>{warning_title}</strong></p>
+                <p style="margin:5px 0;">{warning_intro}</p>
                 <ul style="margin:5px 0 0 20px;">
                     <li>High head operation increasing blade strike probability</li>
                     <li>Large fish size relative to turbine runner clearances</li>
